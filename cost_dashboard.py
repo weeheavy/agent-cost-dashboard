@@ -37,6 +37,9 @@ class DailyStats(TypedDict):
     messages: int
     tokens: int
     cost: float
+    # Per-model cost breakdown for stacked bar chart.
+    # Keys are model names, values are accumulated costs.
+    models: dict[str, float]
 
 
 class SessionStats(TypedDict):
@@ -130,7 +133,7 @@ def create_tool_stats() -> ToolStats:
 
 
 def create_daily_stats() -> DailyStats:
-    return {"messages": 0, "tokens": 0, "cost": 0.0}
+    return {"messages": 0, "tokens": 0, "cost": 0.0, "models": {}}
 
 
 # Session directories for different agents: (path, agent_command, source_type)
@@ -1120,12 +1123,23 @@ def analyze_project(project_dir: Path, agent_cmd: str, source_type: str = "stand
                         project_stats["tools"][tool_name]["errors"] += tstats["errors"]
 
                     # Track subagent daily stats
+                    n_ts = max(len(sub_stats["timestamps"]), 1)
                     for ts in sub_stats["timestamps"]:
                         day_key = ts.strftime("%Y-%m-%d")
                         project_stats["daily_stats"][day_key]["messages"] += 1
-                        project_stats["daily_stats"][day_key]["cost"] += sub_stats[
-                            "cost_total"
-                        ] / max(len(sub_stats["timestamps"]), 1)
+                        project_stats["daily_stats"][day_key]["cost"] += (
+                            sub_stats["cost_total"] / n_ts
+                        )
+                        for mdl, mst in sub_stats["models"].items():
+                            project_stats["daily_stats"][day_key]["models"][
+                                mdl
+                            ] = project_stats["daily_stats"][day_key][
+                                "models"
+                            ].get(
+                                mdl, 0.0
+                            ) + mst[
+                                "cost"
+                            ] / n_ts
 
         # Get UID from file or generate random one
         session_uid = get_session_id_from_file(str(filepath), source_type) or str(
@@ -1177,12 +1191,19 @@ def analyze_project(project_dir: Path, agent_cmd: str, source_type: str = "stand
             project_stats["tools"][tool_name]["time"] += tstats["time"]
             project_stats["tools"][tool_name]["errors"] += tstats["errors"]
 
+        n_ts = max(len(stats["timestamps"]), 1)
         for ts in stats["timestamps"]:
             day_key = ts.strftime("%Y-%m-%d")
             project_stats["daily_stats"][day_key]["messages"] += 1
-            project_stats["daily_stats"][day_key]["cost"] += stats["cost_total"] / max(
-                len(stats["timestamps"]), 1
+            project_stats["daily_stats"][day_key]["cost"] += (
+                stats["cost_total"] / n_ts
             )
+            for mdl, mst in stats["models"].items():
+                project_stats["daily_stats"][day_key]["models"][
+                    mdl
+                ] = project_stats["daily_stats"][day_key]["models"].get(
+                    mdl, 0.0
+                ) + mst["cost"] / n_ts
 
         if stats["start"]:
             if (
@@ -1352,12 +1373,19 @@ def _build_codex_project_stats(
             project_stats["tools"][tool_name]["time"] += tstats["time"]
             project_stats["tools"][tool_name]["errors"] += tstats["errors"]
 
+        n_ts = max(len(stats["timestamps"]), 1)
         for ts in stats["timestamps"]:
             day_key = ts.strftime("%Y-%m-%d")
             project_stats["daily_stats"][day_key]["messages"] += 1
-            project_stats["daily_stats"][day_key]["cost"] += stats[
-                "cost_total"
-            ] / max(len(stats["timestamps"]), 1)
+            project_stats["daily_stats"][day_key]["cost"] += (
+                stats["cost_total"] / n_ts
+            )
+            for mdl, mst in stats["models"].items():
+                project_stats["daily_stats"][day_key]["models"][
+                    mdl
+                ] = project_stats["daily_stats"][day_key]["models"].get(
+                    mdl, 0.0
+                ) + mst["cost"] / n_ts
 
         if stats["start"]:
             if (
@@ -1406,6 +1434,12 @@ def _accumulate_global_stats(
     for day, dstats in project_stats["daily_stats"].items():
         global_stats["daily_stats"][day]["messages"] += dstats["messages"]
         global_stats["daily_stats"][day]["cost"] += dstats["cost"]
+        for mdl, mcost in dstats.get("models", {}).items():
+            global_stats["daily_stats"][day]["models"][
+                mdl
+            ] = global_stats["daily_stats"][day]["models"].get(
+                mdl, 0.0
+            ) + mcost
 
 
 def collect_all_stats() -> tuple[list[ProjectStats], GlobalStats]:
@@ -1797,6 +1831,18 @@ def generate_html():
             overflow: hidden;
         }}
         
+        /* Stacked bar: child segments sit side-by-side via flex */
+        .bar-container.stacked {{
+            display: flex;
+            flex-direction: row;
+            background: var(--bg-tertiary);
+        }}
+        
+        .bar-segment {{
+            height: 8px;
+            flex-shrink: 0;
+        }}
+        
         .bar {{
             height: 100%;
             background: var(--accent-green);
@@ -1807,6 +1853,30 @@ def generate_html():
             padding: 16px;
         }}
         
+        /* Legend strip above the daily bars */
+        .daily-legend {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 14px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }}
+        
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }}
+        
+        .legend-dot {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }}
+        
         .daily-bar {{
             display: flex;
             align-items: center;
@@ -1814,9 +1884,10 @@ def generate_html():
         }}
         
         .daily-bar .date {{
-            width: 100px;
+            width: 130px;
             font-size: 13px;
             color: var(--text-secondary);
+            flex-shrink: 0;
         }}
         
         .daily-bar .bar-wrapper {{
@@ -1829,6 +1900,45 @@ def generate_html():
             text-align: right;
             font-size: 13px;
             color: var(--accent-green);
+            flex-shrink: 0;
+        }}
+        
+        /* Monthly total summary row */
+        .monthly-total-row {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 14px;
+            margin-top: 4px;
+            padding: 6px 0;
+            border-top: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--border-color);
+        }}
+        
+        .monthly-total-row .date {{
+            width: 130px;
+            flex-shrink: 0;
+        }}
+        
+        .monthly-total-row .bar-wrapper {{
+            flex: 1;
+            margin: 0 12px;
+        }}
+        
+        .monthly-label {{
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        
+        .monthly-amount {{
+            width: 80px;
+            text-align: right;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--accent-green);
+            flex-shrink: 0;
         }}
         
         .refresh-note {{
@@ -2061,29 +2171,197 @@ def generate_html():
             <div class="section-header">
                 <span>📊 Daily Spending</span>
             </div>
-            <div class="daily-chart">
+            <div class="daily-chart" id="daily-chart-content">
 """
 
-    # Daily chart
-    if global_stats["daily_stats"]:
-        max_daily = max(d["cost"] for d in global_stats["daily_stats"].values())
-        for day in sorted(global_stats["daily_stats"].keys())[-14:]:
-            stats = global_stats["daily_stats"][day]
-            pct = (stats["cost"] / max_daily * 100) if max_daily > 0 else 0
-            html_content += f"""
-                <div class="daily-bar">
-                    <span class="date">{day}</span>
-                    <div class="bar-wrapper">
-                        <div class="bar-container">
-                            <div class="bar" style="width: {pct}%"></div>
-                        </div>
-                    </div>
-                    <span class="amount">${stats["cost"]:.2f}</span>
-                </div>
-"""
+    # Build daily stats JSON for client-side chart rendering.
+    # Each entry: {day, cost, models: {modelName: cost}}
+    daily_stats_list = []
+    for day in sorted(global_stats["daily_stats"].keys()):
+        day_data = global_stats["daily_stats"][day]
+        daily_stats_list.append(
+            {
+                "day": day,
+                "cost": day_data["cost"],
+                "models": day_data.get("models", {}),
+            }
+        )
+    daily_stats_json = json.dumps(daily_stats_list)
 
-    html_content += """
+    html_content += f"""
             </div>
+            <script>
+            (function() {{
+                const dailyStats = {daily_stats_json};
+
+                // Collect all model names ordered by total cost (highest first)
+                const modelTotals = {{}};
+                dailyStats.forEach(d => {{
+                    Object.entries(d.models).forEach(([m, c]) => {{
+                        modelTotals[m] = (modelTotals[m] || 0) + c;
+                    }});
+                }});
+                const allModels = Object.keys(modelTotals).sort(
+                    (a, b) => modelTotals[b] - modelTotals[a]
+                );
+
+                // Distinct colour palette — one colour per model.
+                // We cycle through a fixed set so the same model always
+                // gets the same colour across page reloads.
+                const PALETTE = [
+                    '#3fb950', // green  (matches accent-green)
+                    '#58a6ff', // blue
+                    '#a371f7', // purple
+                    '#d29922', // yellow
+                    '#f85149', // red
+                    '#39d353', // bright green
+                    '#79c0ff', // light blue
+                    '#ff7b72', // salmon
+                    '#ffa657', // orange
+                    '#56d364', // lime
+                    '#bc8cff', // lavender
+                    '#e3b341', // amber
+                ];
+                function modelColor(model, idx) {{
+                    return PALETTE[idx % PALETTE.length];
+                }}
+
+                // Only show the last 14 days by default; full history is
+                // accessible via a toggle.
+                const RECENT_DAYS = 14;
+                let showAll = false;
+
+                function getVisibleDays() {{
+                    return showAll ? dailyStats : dailyStats.slice(-RECENT_DAYS);
+                }}
+
+                function render() {{
+                    const visible = getVisibleDays();
+                    if (!visible.length) return;
+
+                    const maxCost = Math.max(...visible.map(d => d.cost), 0.0001);
+
+                    // Group days by YYYY-MM for monthly totals
+                    const monthTotals = {{}};
+                    visible.forEach(d => {{
+                        const month = d.day.slice(0, 7);
+                        if (!monthTotals[month]) {{
+                            monthTotals[month] = {{cost: 0, models: {{}}}};
+                        }}
+                        monthTotals[month].cost += d.cost;
+                        Object.entries(d.models).forEach(([m, c]) => {{
+                            monthTotals[month].models[m] =
+                                (monthTotals[month].models[m] || 0) + c;
+                        }});
+                    }});
+
+                    let html = '';
+
+                    // Legend
+                    if (allModels.length > 0) {{
+                        html += '<div class="daily-legend">';
+                        allModels.forEach((m, i) => {{
+                            const color = modelColor(m, i);
+                            const shortName = m.length > 35
+                                ? m.slice(0, 32) + '...' : m;
+                            html += `<span class="legend-item">
+                                <span class="legend-dot" style="background:${{color}}"></span>
+                                ${{shortName}}
+                            </span>`;
+                        }});
+                        html += '</div>';
+                    }}
+
+                    let prevMonth = null;
+
+                    visible.forEach(d => {{
+                        const month = d.day.slice(0, 7);
+
+                        // Insert monthly total separator when month changes
+                        // (after we have seen all days of the previous month)
+                        if (prevMonth && month !== prevMonth) {{
+                            const mt = monthTotals[prevMonth];
+                            const mtPct = (mt.cost / maxCost * 100).toFixed(1);
+                            html += renderMonthRow(prevMonth, mt, maxCost);
+                        }}
+                        prevMonth = month;
+
+                        // Stacked bar for this day
+                        const pct = (d.cost / maxCost * 100);
+                        let stackedSegments = '';
+                        let usedPct = 0;
+                        allModels.forEach((m, i) => {{
+                            const mCost = d.models[m] || 0;
+                            const mPct = (mCost / maxCost * 100);
+                            if (mPct < 0.01) return;
+                            stackedSegments += `<div class="bar-segment" style="width:${{mPct.toFixed(2)}}%;background:${{modelColor(m, i)}}" title="${{m}}: $${{mCost.toFixed(4)}}"></div>`;
+                            usedPct += mPct;
+                        }});
+
+                        html += `
+                            <div class="daily-bar">
+                                <span class="date">${{d.day}}</span>
+                                <div class="bar-wrapper">
+                                    <div class="bar-container stacked">
+                                        ${{stackedSegments}}
+                                    </div>
+                                </div>
+                                <span class="amount">$${{d.cost.toFixed(2)}}</span>
+                            </div>`;
+                    }});
+
+                    // Monthly total for the last visible month
+                    if (prevMonth) {{
+                        html += renderMonthRow(prevMonth, monthTotals[prevMonth], maxCost);
+                    }}
+
+                    // Toggle button
+                    const totalDays = dailyStats.length;
+                    if (totalDays > RECENT_DAYS) {{
+                        const label = showAll
+                            ? 'Show last 14 days'
+                            : `Show all ${{totalDays}} days`;
+                        html += `<div style="margin-top:12px;text-align:center">
+                            <button onclick="toggleDailyChart()" class="copy-btn">${{label}}</button>
+                        </div>`;
+                    }}
+
+                    document.getElementById('daily-chart-content').innerHTML = html;
+                }}
+
+                function renderMonthRow(month, mt, maxCost) {{
+                    const [year, mon] = month.split('-');
+                    const label = new Date(year, mon - 1).toLocaleString('default',
+                        {{month: 'long', year: 'numeric'}});
+                    const pct = (mt.cost / maxCost * 100);
+                    let segments = '';
+                    allModels.forEach((m, i) => {{
+                        const mCost = mt.models[m] || 0;
+                        const mPct = (mCost / maxCost * 100);
+                        if (mPct < 0.01) return;
+                        segments += `<div class="bar-segment" style="width:${{mPct.toFixed(2)}}%;background:${{modelColor(m, i)}};opacity:0.55" title="${{m}}: $${{mCost.toFixed(4)}}"></div>`;
+                    }});
+                    return `
+                        <div class="monthly-total-row">
+                            <span class="date monthly-label">${{label}}</span>
+                            <div class="bar-wrapper">
+                                <div class="bar-container stacked">
+                                    ${{segments}}
+                                </div>
+                            </div>
+                            <span class="amount monthly-amount">$${{mt.cost.toFixed(2)}}</span>
+                        </div>`;
+                }}
+
+                window.toggleDailyChart = function() {{
+                    showAll = !showAll;
+                    render();
+                }};
+
+                render();
+            }})();
+            </script>
+        </div>
         </div>
         
         <div class="section">
